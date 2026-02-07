@@ -1,0 +1,434 @@
+"""
+Redis Caching Strategy for SiteGPT
+==================================
+
+Redis Data Structures & Key Naming Conventions
+"""
+
+# ===================================================================
+# KEY NAMING CONVENTIONS
+# ===================================================================
+
+"""
+Pattern: {domain}:{entity}:{identifier}:{attribute}
+Examples:
+- user:session:uuid:data
+- chatbot:config:uuid:settings
+- thread:messages:uuid:list
+- rate:limit:user:uuid:count
+"""
+
+# ===================================================================
+# 1. SESSION MANAGEMENT (Critical - High Read/Write)
+# ===================================================================
+
+# User session data (JWT alternative or session storage)
+# Type: Hash
+# TTL: 24 hours
+# Key: session:{session_id}
+"""
+HSET session:abc123 user_id "uuid-here"
+HSET session:abc123 email "user@example.com"
+HSET session:abc123 name "John Doe"
+HSET session:abc123 subscription_tier "PRO"
+EXPIRE session:abc123 86400
+
+# Read session
+HGETALL session:abc123
+"""
+
+# Active sessions per user (for logout all devices)
+# Type: Set
+# TTL: 30 days
+# Key: user:sessions:{user_id}
+"""
+SADD user:sessions:uuid-123 session:abc123
+SADD user:sessions:uuid-123 session:def456
+EXPIRE user:sessions:uuid-123 2592000
+
+# Logout all devices
+SMEMBERS user:sessions:uuid-123
+# Then delete each session
+"""
+
+# ===================================================================
+# 2. RATE LIMITING (Critical - Very High Read/Write)
+# ===================================================================
+
+# User message rate limiting (sliding window)
+# Type: Sorted Set (timestamp as score)
+# TTL: 1 hour
+# Key: rate:user:{user_id}:messages
+"""
+# Add message timestamp
+ZADD rate:user:uuid-123:messages <timestamp> <message_id>
+# Remove old entries outside window
+ZREMRANGEBYSCORE rate:user:uuid-123:messages 0 <cutoff_timestamp>
+# Count messages in window
+ZCARD rate:user:uuid-123:messages
+EXPIRE rate:user:uuid-123:messages 3600
+"""
+
+# API key rate limiting
+# Type: Sorted Set
+# TTL: 1 hour
+# Key: rate:api:{api_key_id}:requests
+"""
+ZADD rate:api:key-123:requests <timestamp> <request_id>
+ZREMRANGEBYSCORE rate:api:key-123:requests 0 <cutoff_timestamp>
+ZCARD rate:api:key-123:requests
+EXPIRE rate:api:key-123:requests 3600
+"""
+
+# Chatbot-level rate limiting
+# Type: String (simple counter)
+# TTL: 60 seconds (per minute limit)
+# Key: rate:chatbot:{chatbot_id}:minute
+"""
+INCR rate:chatbot:uuid-123:minute
+EXPIRE rate:chatbot:uuid-123:minute 60
+GET rate:chatbot:uuid-123:minute
+"""
+
+# ===================================================================
+# 3. USER & SUBSCRIPTION CACHE (High Read, Low Write)
+# ===================================================================
+
+# User profile cache
+# Type: Hash
+# TTL: 1 hour
+# Key: user:profile:{user_id}
+"""
+HSET user:profile:uuid-123 email "user@example.com"
+HSET user:profile:uuid-123 name "John Doe"
+HSET user:profile:uuid-123 subscription_id "sub-uuid"
+HSET user:profile:uuid-123 subscription_type "PRO"
+HSET user:profile:uuid-123 max_chatbots "5"
+HSET user:profile:uuid-123 max_messages "10000"
+EXPIRE user:profile:uuid-123 3600
+
+# Invalidate on user update
+DEL user:profile:uuid-123
+"""
+
+# Active subscription details
+# Type: Hash
+# TTL: 30 minutes
+# Key: user:subscription:{user_id}
+"""
+HSET user:subscription:uuid-123 status "active"
+HSET user:subscription:uuid-123 period_end "2026-02-20T00:00:00Z"
+HSET user:subscription:uuid-123 chatbots_allowed "5"
+HSET user:subscription:uuid-123 messages_limit "10000"
+HSET user:subscription:uuid-123 api_access "true"
+EXPIRE user:subscription:uuid-123 1800
+
+# Check subscription validity
+HGET user:subscription:uuid-123 status
+"""
+
+# Usage tracking (current billing period)
+# Type: Hash
+# TTL: Until period end
+# Key: usage:{user_id}:{period_start}
+"""
+HINCRBY usage:uuid-123:2026-01-01 chatbots_created 1
+HINCRBY usage:uuid-123:2026-01-01 messages_sent 1
+HINCRBY usage:uuid-123:2026-01-01 tokens_used 450
+HGETALL usage:uuid-123:2026-01-01
+
+# Set expiry to period end
+EXPIREAT usage:uuid-123:2026-01-01 <period_end_timestamp>
+"""
+
+# ===================================================================
+# 4. CHATBOT CONFIGURATION CACHE (High Read, Low Write)
+# ===================================================================
+
+# Chatbot settings (aggregated from multiple tables)
+# Type: Hash
+# TTL: 1 hour
+# Key: chatbot:config:{chatbot_id}
+"""
+HSET chatbot:config:uuid-123 name "Support Bot"
+HSET chatbot:config:uuid-123 llm_model "gpt-4"
+HSET chatbot:config:uuid-123 temperature "0.7"
+HSET chatbot:config:uuid-123 welcome_message "Hello!"
+HSET chatbot:config:uuid-123 primary_color "#FF5733"
+HSET chatbot:config:uuid-123 enable_lead_collection "true"
+EXPIRE chatbot:config:uuid-123 3600
+
+# Invalidate on settings update
+DEL chatbot:config:uuid-123
+"""
+
+# Chatbot prompt/instruction cache
+# Type: String (JSON)
+# TTL: 2 hours
+# Key: chatbot:instruction:{chatbot_id}
+"""
+SET chatbot:instruction:uuid-123 '{"title":"...", "instruction":"...", "creativity":0.7}'
+EXPIRE chatbot:instruction:uuid-123 7200
+"""
+
+# Active chatbots per user
+# Type: Set
+# TTL: 1 hour
+# Key: user:chatbots:{user_id}
+"""
+SADD user:chatbots:uuid-123 chatbot-uuid-1
+SADD user:chatbots:uuid-123 chatbot-uuid-2
+SCARD user:chatbots:uuid-123  # Count for limit check
+EXPIRE user:chatbots:uuid-123 3600
+"""
+
+# ===================================================================
+# 5. THREAD & MESSAGE CACHE (High Read, Medium Write)
+# ===================================================================
+
+# Active threads per chatbot (for dashboard)
+# Type: Sorted Set (updated_at as score)
+# TTL: 30 minutes
+# Key: chatbot:threads:{chatbot_id}:active
+"""
+ZADD chatbot:threads:uuid-123:active <timestamp> thread-uuid-1
+ZADD chatbot:threads:uuid-123:active <timestamp> thread-uuid-2
+# Get recent threads
+ZREVRANGE chatbot:threads:uuid-123:active 0 9
+EXPIRE chatbot:threads:uuid-123:active 1800
+"""
+
+# Thread metadata
+# Type: Hash
+# TTL: 15 minutes
+# Key: thread:meta:{thread_id}
+"""
+HSET thread:meta:uuid-456 chatbot_id "uuid-123"
+HSET thread:meta:uuid-456 mode "AI"
+HSET thread:meta:uuid-456 escalated "false"
+HSET thread:meta:uuid-456 unread_count "3"
+HSET thread:meta:uuid-456 customer_email "user@example.com"
+EXPIRE thread:meta:uuid-456 900
+"""
+
+# Recent messages in thread (last 50)
+# Type: List
+# TTL: 10 minutes
+# Key: thread:messages:{thread_id}
+"""
+# Add new message (JSON stringified)
+LPUSH thread:messages:uuid-456 '{"id":"msg-1","content":"Hello","role":"USER",...}'
+LTRIM thread:messages:uuid-456 0 49  # Keep only last 50
+LRANGE thread:messages:uuid-456 0 -1  # Get all cached messages
+EXPIRE thread:messages:uuid-456 600
+"""
+
+# Conversation context window (for LLM)
+# Type: String (JSON array)
+# TTL: 5 minutes
+# Key: thread:context:{thread_id}
+"""
+SET thread:context:uuid-456 '[{"role":"user","content":"..."},{"role":"assistant","content":"..."}]'
+EXPIRE thread:context:uuid-456 300
+"""
+
+# ===================================================================
+# 6. INGESTION STATUS CACHE (Medium Read/Write)
+# ===================================================================
+
+# File processing status
+# Type: Hash
+# TTL: 1 hour
+# Key: ingestion:file:{file_id}
+"""
+HSET ingestion:file:uuid-789 status "CHUNKING"
+HSET ingestion:file:uuid-789 total_chunks "45"
+HSET ingestion:file:uuid-789 processed_chunks "23"
+HSET ingestion:file:uuid-789 progress "51"
+EXPIRE ingestion:file:uuid-789 3600
+
+# Real-time progress tracking
+HGET ingestion:file:uuid-789 progress
+"""
+
+# Pending ingestion queue (processing order)
+# Type: List
+# Key: queue:ingestion:pending
+"""
+LPUSH queue:ingestion:pending file-uuid-1
+LPUSH queue:ingestion:pending file-uuid-2
+RPOP queue:ingestion:pending  # Process next file
+"""
+
+# Failed ingestion tracking
+# Type: Sorted Set (retry count as score)
+# TTL: 24 hours
+# Key: ingestion:failed
+"""
+ZADD ingestion:failed 1 file-uuid-1  # First failure
+ZINCRBY ingestion:failed 1 file-uuid-1  # Increment retry
+ZRANGE ingestion:failed 0 -1 WITHSCORES  # Get all failed with retry counts
+EXPIRE ingestion:failed 86400
+"""
+
+# ===================================================================
+# 7. LLM MODEL USAGE TRACKING (High Write, Medium Read)
+# ===================================================================
+
+# Real-time token usage (buffer before DB write)
+# Type: Hash
+# TTL: 5 minutes
+# Key: llm:usage:{user_id}:{model}
+"""
+HINCRBY llm:usage:uuid-123:gpt-4 messages 1
+HINCRBY llm:usage:uuid-123:gpt-4 tokens 450
+HGETALL llm:usage:uuid-123:gpt-4
+EXPIRE llm:usage:uuid-123:gpt-4 300
+
+# Batch flush to DB every 5 minutes
+"""
+
+# ===================================================================
+# 8. API KEY VALIDATION CACHE (Very High Read, Low Write)
+# ===================================================================
+
+# Valid API keys
+# Type: Hash
+# TTL: 1 hour
+# Key: apikey:valid:{api_key_hash}
+"""
+HSET apikey:valid:hash123 user_id "uuid-123"
+HSET apikey:valid:hash123 is_active "true"
+HSET apikey:valid:hash123 last_used "2026-01-20T10:30:00Z"
+EXPIRE apikey:valid:hash123 3600
+
+# Validate API key
+HGETALL apikey:valid:hash123
+"""
+
+# ===================================================================
+# 9. TEAM MEMBER PERMISSIONS (Medium Read, Low Write)
+# ===================================================================
+
+# Team member roles per chatbot
+# Type: Hash
+# TTL: 30 minutes
+# Key: chatbot:team:{chatbot_id}
+"""
+HSET chatbot:team:uuid-123 user-uuid-1 "ADMIN"
+HSET chatbot:team:uuid-123 user-uuid-2 "AGENT"
+HGET chatbot:team:uuid-123 user-uuid-1  # Check role
+EXPIRE chatbot:team:uuid-123 1800
+"""
+
+# User's accessible chatbots
+# Type: Set
+# TTL: 30 minutes
+# Key: user:accessible-chatbots:{user_id}
+"""
+SADD user:accessible-chatbots:uuid-123 chatbot-uuid-1
+SADD user:accessible-chatbots:uuid-123 chatbot-uuid-2
+SISMEMBER user:accessible-chatbots:uuid-123 chatbot-uuid-1  # Check access
+EXPIRE user:accessible-chatbots:uuid-123 1800
+"""
+
+# ===================================================================
+# 10. WEBHOOK QUEUE (High Write, Medium Read)
+# ===================================================================
+
+# Webhook delivery queue
+# Type: List
+# Key: queue:webhooks:pending
+"""
+LPUSH queue:webhooks:pending '{"thread_id":"uuid","event":"message.new","url":"..."}'
+RPOP queue:webhooks:pending  # Process next webhook
+"""
+
+# Failed webhook tracking (for retry)
+# Type: Sorted Set (retry_count as score)
+# TTL: 24 hours
+# Key: webhooks:failed
+"""
+ZADD webhooks:failed 1 webhook-uuid-1
+ZINCRBY webhooks:failed 1 webhook-uuid-1
+EXPIRE webhooks:failed 86400
+"""
+
+# ===================================================================
+# 11. CACHING STATISTICS & MONITORING
+# ===================================================================
+
+# Cache hit/miss tracking
+# Type: Hash
+# Key: stats:cache:daily:{date}
+"""
+HINCRBY stats:cache:daily:2026-01-20 hits 1
+HINCRBY stats:cache:daily:2026-01-20 misses 1
+HGETALL stats:cache:daily:2026-01-20
+"""
+
+# ===================================================================
+# 12. PROMOTIONAL & REFERRAL CACHE
+# ===================================================================
+
+# Active promo codes
+# Type: Hash
+# TTL: 1 hour
+# Key: promo:code:{promo_code}
+"""
+HSET promo:code:WELCOME2026 message_added "50"
+HSET promo:code:WELCOME2026 pages_added "10"
+HSET promo:code:WELCOME2026 target_audience "NEW_USERS"
+EXPIRE promo:code:WELCOME2026 3600
+"""
+
+# ===================================================================
+# REDIS CONFIGURATION RECOMMENDATIONS
+# ===================================================================
+
+"""
+redis.conf settings:
+
+maxmemory 2gb
+maxmemory-policy allkeys-lru  # Evict least recently used keys
+maxmemory-samples 5
+
+# Persistence (optional - for session recovery)
+save 900 1      # Save if 1 key changed in 15 minutes
+save 300 10     # Save if 10 keys changed in 5 minutes
+save 60 10000   # Save if 10000 keys changed in 1 minute
+
+# AOF for durability (sessions)
+appendonly yes
+appendfsync everysec
+"""
+
+# ===================================================================
+# CACHE INVALIDATION PATTERNS
+# ===================================================================
+
+"""
+1. On user update:
+   - DEL user:profile:{user_id}
+   - DEL user:subscription:{user_id}
+
+2. On chatbot settings update:
+   - DEL chatbot:config:{chatbot_id}
+   - DEL chatbot:instruction:{chatbot_id}
+
+3. On subscription change:
+   - DEL user:subscription:{user_id}
+   - DEL user:profile:{user_id}
+
+4. On team member add/remove:
+   - DEL chatbot:team:{chatbot_id}
+   - DEL user:accessible-chatbots:{user_id}
+
+5. On message send:
+   - LPUSH thread:messages:{thread_id}
+   - ZADD chatbot:threads:{chatbot_id}:active
+   - HINCRBY usage:{user_id}:{period} messages_sent 1
+
+6. On API key revoke:
+   - DEL apikey:valid:{api_key_hash}
+"""

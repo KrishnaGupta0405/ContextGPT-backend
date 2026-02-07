@@ -1,10 +1,10 @@
-import 'dotenv/config'; // <--- Add this line
-import { defineConfig } from 'drizzle-kit';
+import "dotenv/config"; // <--- Add this line
+import { defineConfig } from "drizzle-kit";
 
 export default defineConfig({
-  schema: './src/schema',
-  out: './drizzle',
-  dialect: 'postgresql',
+  schema: "./src/schema",
+  out: "./drizzle",
+  dialect: "postgresql",
   dbCredentials: {
     // host: process.env.HOST,
     // port: Number(process.env.PORT), // Make sure port is a number
@@ -15,10 +15,6 @@ export default defineConfig({
     url: process.env.DATABASE_URL,
   },
 });
-
-
-
-
 
 // It will now correctly:
 

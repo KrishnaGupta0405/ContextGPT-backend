@@ -10,8 +10,7 @@ async function generateAccessToken(user) {
     {
       id: user.id,
       email: user.email,
-      username: user.username,
-      fullName: user.fullName,
+      name: user.name,
     },
     process.env.ACCESS_TOKEN_SECRET,
     { expiresIn: process.env.ACCESS_TOKEN_EXPIRY }
@@ -20,9 +19,17 @@ async function generateAccessToken(user) {
 
 // Generate refresh token
 async function generateRefreshToken(user) {
-  return jwt.sign({ id: user.id }, process.env.REFRESH_TOKEN_SECRET, {
-    expiresIn: process.env.REFRESH_TOKEN_EXPIRY,
-  });
+  return jwt.sign(
+    {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+    },
+    process.env.REFRESH_TOKEN_SECRET,
+    {
+      expiresIn: process.env.REFRESH_TOKEN_EXPIRY,
+    }
+  );
 }
 
 const verifyJWT = asyncHandler(async (req, _, next) => {
@@ -36,21 +43,22 @@ const verifyJWT = asyncHandler(async (req, _, next) => {
       throw new ApiError(401, "Unauthorized request");
     }
 
+    // take the user_id from the token, and find the user in the database
     const decodedToken = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
 
+    if (!decodedToken || !decodedToken.id) {
+      throw new ApiError(401, "Invalid Access Token: Missing user ID");
+    }
+
     const userResult = await db.execute(
-      sql`select * from users where id=${decodedToken?.id}`
+      sql`select * from users where id=${decodedToken.id}`
     );
 
     if (!userResult?.rows?.length) {
       throw new ApiError(401, "Invalid Access Token: User not found");
     }
 
-    const {
-      password: removedPassword,
-      refresh_token: _,
-      ...safeUser
-    } = userResult.rows[0];
+    const { password: removedPassword, ...safeUser } = userResult.rows[0];
 
     req.user = safeUser;
     // console.log("user-> ", safeUser);

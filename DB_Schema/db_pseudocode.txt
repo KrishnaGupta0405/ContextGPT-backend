@@ -1,0 +1,904 @@
+subscription{
+    id,
+    type,
+    price,
+    chatbot_given integer,
+    pages_upto integer,
+    team_member_Access integer,
+    api_access boolean,
+    auto_sync_data boolean,
+    auto_sync_data_occurence "Monthly data refresh, weekly, daily",
+    webhook_support boolean,
+    platform_integration_allowed "MESSENGER | CRISP, | ZOHO SALE IQ",
+    custom_playform_integration boolean,
+    user_message_rate_limit,
+    created_at timestamp,
+    updated_at timestamp,
+}
+
+add_ons{
+    id,
+    title, "Remove SiteGPT Branding +$59/mo | Extra 5k Messages +$59 /mo"
+    price,
+    created_at timestamp,
+    updated_at timestamp,
+}
+
+// either given by companies, or shared by user's,
+promotion_referral {
+    id serial pk
+    promotion_share_text text -- "Invite a friend and get 50 messages!"
+    promo_code varchar(50) -- e.g., "WELCOME2026"
+    message_added integer -- The reward value
+    pages_added integer -- The reward value
+    is_active boolean
+    target_audience varchar "NEW_USERS | EXISTING_USERS | ALL"
+    created_at timestamp,
+    updated_at timestamp,
+}
+
+system_errors {
+  id bigserial pk
+
+  -- Scope / Ownership
+  service varchar(50)
+  -- INGESTION | RETRIEVAL | GENERATION | API | BILLING | INTEGRATION | AUTH
+
+  error_stage varchar(50)
+  -- UPLOAD | CHUNKING | EMBEDDING | VECTOR_SEARCH | LLM_CALL | RESPONSE_STREAM | WEBHOOK
+
+  severity varchar(20)
+  -- INFO | WARN | ERROR | CRITICAL
+
+  -- Entity references (flexible, nullable)
+  user_id varchar(32) not null
+  chatbot_id varchar(32) not null
+  thread_id uuid null
+  message_id uuid null
+  file_id uuid null
+  chunk_id uuid null
+  retrieval_run_id uuid null
+
+  -- Error identity
+  error_code varchar(100)
+  error_message text
+
+  -- Retry & recovery
+  retryable boolean default false
+  // retry_count integer default 0
+  resolved boolean default false
+  resolved_at timestamp
+
+  -- Debug payload
+  metadata jsonb
+  -- provider response, stack trace, pinecone error, openai error, etc.
+
+  created_at timestamp default now()
+}
+
+llm_models {
+  id varchar(50) pk
+  provider varchar(50) -- openai, anthropic, google
+  title varchar(100)
+  total_message_canBeDone integer,
+  under_this_subscription_id fk -> subscription(id)
+  is_active boolean default true,
+  created_at timestamp,
+  updated_at timestamp,
+}
+
+| Role | Access Query Logic |
+| :--- | :--- |
+| Super Admin | Usually, you skip the users_team_members check and just SELECT * FROM user_chatbots. They see everything because they own the "Organization" or account. |
+| Admin | You query users_team_members. They will likely be linked to all chatbots created under that account, with the power to invite others to any of them. |
+| Manager | You query users_team_members. They only see the chatbots they were invited to. They can invite Agents to a subset of these specific bots. |
+| Agent | You query users_team_members. They only see the specific chatbots assigned to them. They cannot see or invite others to any other bots. |
+
+users {
+    id varchar(32) pk "User ID"
+    email varchar(255) unique not null "Email Address"
+    name varchar(255) "Full Name"
+    profile_pic text "Profile Picture URL"
+
+    FaceBook_link TEXT,
+    instagram_link TEXT,
+    linkedin_link TEXT,
+    twitter_link TEXT,
+    youtube_link TEXT,
+
+    created_at timestamp "Account Created"
+    updated_at timestamp "Last Updated"
+}
+
+//Role-Based Access Control (RBAC)
+
+| Role        | Permissions                                                          |
+| :---------- | :------------------------------------------------------------------- |
+| Agent       | View/Reply to chat history. Cannot invite others.                    |
+| Manager     | Edit chatbot settings + Invite Agents. Cannot invite other Managers. |
+| Admin       | Manage all members (except Super Admin). Full settings access.       |
+| Super Admin | Full access + Ability to delete the chatbot.                         |
+
+Send Invite: Insert a row into chatbot_invitations and send an email with the token.
+Accept Invite: When the user clicks the link, find the record by token, insert the user into chatbot_team_members, and mark the invitation as ACCEPTED.
+Middleware: Create a function in your backend (e.g., checkPermission(userId, chatbotId, requiredRole)) that runs the queries above before allowing any API action.
+
+-- Tracks pending invites sent to emails
+users_invitations {
+    id uuid pk
+    chatbot_id fk -> chatbots(id)
+    email varchar(255)
+    role varchar(20) -- "AGENT | MANAGER | ADMIN"
+    invited_by_id fk -> users(id)
+    token varchar(255) unique -- For the invite link
+    status varchar(20) -- "PENDING | ACCEPTED | EXPIRED"
+    created_at timestamp,
+    updated_at timestamp,
+}
+
+-- Tracks active access to a chatbot
+users_team_members {
+    id uuid pk
+    chatbot_id fk -> chatbots(id)
+    user_id fk -> users(id)
+    role varchar(20) -- "AGENT | MANAGER | ADMIN | SUPER_ADMIN"
+    joined_at timestamp,
+    leaved_at timestamp,
+    created_at timestamp,
+    updated_at timestamp,
+}
+
+user_addons_purchased {
+    id uuid pk
+    user_id varchar(32) fk -> users(id)
+    addon_id fk -> add_ons(id)
+    subscription_id fk -> user_subscriptions(id)
+
+    removes_watermark BOOLEAN NOT NULL DEFAULT FALSE,
+    priority_support BOOLEAN NOT NULL DEFAULT FALSE,
+    custom_branding BOOLEAN NOT NULL DEFAULT FALSE;
+    purchase_date timestamp
+    is_active boolean default true
+    -- We store the values at time of purchase in case the master 'add_ons' price/value changes
+    extra_messages_granted integer
+    extra_chatbots_granted integer
+    price_paid decimal(10,2),
+
+    created_at timestamp,
+    updated_at timestamp,
+}
+
+// these are what shared by the user to invite new users
+user_refferals {
+    id uuid pk
+    user_id varchar(32) fk -> users(id)
+    receiver_user_id varchar(32) fk -> users(id)
+
+    promotion_id fk -> promotion_reffral(id)
+    redeemed_at timestamp
+
+    -- The specific benefit applied to this user
+    bonus_messages integer
+    bonus_pages integer
+    // add theses bonuses inside user_message_rate_limit
+
+    expiry_date timestamp default null -- Optional: if bonuses expire after a year
+
+    created_at timestamp,
+    updated_at timestamp,
+}
+
+user_subscriptions {
+    id uuid pk
+    user_id fk -> users(id)
+    subscription_id fk -> subscription(id)
+    status varchar "active | trialing | past_due | canceled"
+    current_period_start timestamp
+    current_period_end timestamp
+    cancel_at_period_end boolean
+
+    -- Snapshots of the plan limits (to handle price changes over time)
+    max_chatbots_allowed integer
+    max_messages_received_allowed integer
+    max_tokens_allowed integer -- optional, better than messages
+
+    referral_id fk -> user_refferals(id)
+    max_pages_allowed integer
+    user_message_rate_limit,
+     
+    referral_bonus_id fk -> user_refferals(id)
+    addon_bonus_id fk -> user_refferals(id)
+    refferal_bonus_id fk -> user_refferals(id)
+
+    // Bonus pages and messages
+    bonus_messages integer,
+    bonus_pages integer,
+    expiry_date timestamp -- Optional: if bonuses expire after a year
+
+    created_at timestamp,
+    updated_at timestamp,
+}
+
+user_usage_tracking {
+    id uuid pk
+    user_id fk -> users(id)
+    user_subscription_id fk -> user_subscriptions(id)
+
+    chatbots_created_count integer default 0
+    messages_sent_count integer default 0
+    messages_received_count integer default 0
+    total_pages_indexed integer default 0
+    team_members_count integer default 0
+
+    llm_usage_id fk -> llm_model_usage(id)
+
+    UNIQUE (user_id, billing_period_start)
+    created_at timestamp default now()
+    updated_at timestamp default now()
+}
+
+user_llm_model_usage {
+    id uuid pk
+    user_id fk -> users(id)
+    
+    model_name varchar(255)
+    messages_count integer
+    tokens_count integer
+    
+    created_at timestamp default now()
+    updated_at timestamp default now()
+}
+
+// this table coloumn totally dependes upon information receieved from credit card companies i.e. razorpay
+
+user_billing {
+    id uuid pk -- Internal unique ID
+    user_id varchar(32) fk -> users(id)
+
+    -- Razorpay Specifics
+    razorpay_payment_id varchar(255) unique -- e.g., pay_Njh123
+    razorpay_order_id varchar(255) -- Used to group multiple payment attempts
+    razorpay_signature varchar(255) -- For security verification
+
+    -- Financial Data
+    amount decimal(10, 2) -- Use decimal for currency, never float
+    currency varchar(3) default 'INR'
+
+    -- Product Info
+    subscription_purchased_id fk -> subscription(id) -- Link to the plan purchased
+    addon_purchased_id fk -> add_ons(id) -- Link to the addon purchased
+    referral_id fk -> user_refferals(id) -- Link to the referral
+
+    billing_type varchar(20) -- SUBSCRIPTION | ADDON | REFERRAL
+
+    -- Payment Method Details (Handling UPI, NEFT, Card)
+    payment_method varchar(20) -- "upi" | "card" | "netbanking" | "wallet" | "transfer"
+    payment_details jsonb -- Store method-specific data (see below)
+
+    payment_status varchar(20) -- "created" | "authorized" | "captured" | "refunded" | "failed"
+    error_code varchar(100) -- Store reason if payment_status is 'failed'
+
+    invoice_id varchar(100) -- Razorpay internal invoice ID
+    invoice_pdf_url text
+
+    created_at timestamp
+    updated_at timestamp
+}
+
+# delete request by the user for file or link
+
+cache_delete_requests {
+    request_id varchar(64) pk "Request ID"
+    url text not null "URL to Purge"
+    status varchar(50) "Status: Pending, Completed"
+    user_id varchar(32) "User Reference"
+    created_at timestamp "Created At"
+    updated_at timestamp "Updated At"  --- copmleted_at
+}
+
+api_keys {
+    id varchar(64) pk "API Key ID"
+    user_id varchar(32) not null "User Reference"
+
+    api_key varchar(255) unique not null "API Key"
+    last_used_at timestamp "Last Used"
+    is_active boolean "Active Status"
+
+    created_at timestamp "Created At"
+}
+
+// Rate limit for user, api_key, chatbot msg received, msg sent, 
+user_rate_limits {
+    id serial pk "Rate Limit ID"
+    subject_type varchar(20) "USER | API_KEY | CHATBOT"
+    subject_id varchar(64) "Reference ID"
+    window_seconds integer "60, 3600"
+    request_limit integer "Max Requests"
+
+    created_at timestamp,
+    updated_at timestamp
+}
+
+api_request_logs {
+  id bigserial pk
+  user_id uuid,
+  api_key_id uuid,
+
+  endpoint varchar(255)
+  method varchar(10)
+  status_code integer
+
+  request_ip inet
+  user_agent text
+
+  response_timestamp timestamp
+  error boolean default false
+
+  created_at timestamp not null
+}
+
+CREATE INDEX idx_api_logs_user_time
+ON api_request_logs (user_id, created_at);
+
+CREATE INDEX idx_api_logs_key_time
+ON api_request_logs (api_key_id, created_at);
+
+Retention rule:- Keep 30–90 days, Archive or delete older rows
+
+
+
+
+user_chatbots {
+    id,
+    user_id, // to check if user has crossed permitted chatbot creation limit
+    
+    created_by_id varchar(32) not null "Creator User ID"
+    
+    created_at timestamp "Created At"
+    updated_at timestamp "Updated At"
+}
+
+user_chatbot_appearance_ui {
+  id serial pk "Settings ID"
+  chatbot_id varchar(32) unique not null "Chatbot Reference"
+
+  chatbot_name
+
+  tooltip text "Tooltip Text"
+  welcome_message text "Welcome Message"
+  input_placeholder_text text "Input Placeholder"
+
+  brand_primary_color varchar(7) "Brand Color Hex",
+  brand_text_color varchar(7) "Text Color Hex",
+  brand_icon_bg_color,
+  show_background boolean // usefull for png icon backgrounds,
+  link_color,
+  font_size integer,
+  chat_height integer "Chat Height (%)"
+  external_link text,
+
+  icon_size varchar(20) "Icon Size: SMALL, MEDIUM, LARGE"
+  icon_position varchar(20) "Icon Position: LEFT, RIGHT"
+  default_mode varchar(20) "Mode: AI, AGENT, HUMAN"
+
+  // excessible to all plans except the starter plan
+  watermark_brand_icon
+  watermark_brand_text
+  watermark_brank_link
+  watermark_brand_info_show boolean
+  hide_watermark_sitegpt
+
+  right_to_left_mode boolean
+  Enable_Dark_Mode
+
+  distance_from_bottom integer "Bottom Distance (px)"
+  horizontal_distance integer "Horizontal Distance (px)"
+
+  bot_icon_src varchar(64)
+  user_icon_src varchar(64)
+  agent_icon_src varchar(64)
+  bubble_icon_src varchar(64)
+
+  created_at timestamp "Created At"
+  updated_at timestamp "Updated At"
+}
+
+user_chatbot_behavior {
+  id serial pk "Settings ID",
+  chatbot_id varchar(32) unique not null "Chatbot Reference",
+
+  hide_sources boolean "Hide Sources",
+  hide_tooltip boolean "Hide Tooltip",
+  hide_feedback_buttons boolean,
+  hide_bottom_navigation boolean,
+  hide_refresh_button boolean,
+  hide_expand_button boolean,
+  hide_home_page boolean,
+
+  stay_on_home_page boolean, //When enabled, users will stay on the home page when there's no existing conversation, instead of automatically creating a new conversation and redirecting.
+  require_terms_acceptance boolean, //When enabled, users must check a checkbox agreeing to your terms before they can start a conversation.
+  disclaimer_text text //Ai can make mistakes, so use with caution.
+
+  auto_open_chat_desktop boolean,
+  auto_open_chat_desktop_delay integer,
+
+  auto_open_chat_mobile boolean,
+  auto_open_chat_mobile_delay integer
+
+  smart_follow_up_prompts_count integer "Smart Prompts Count"
+
+  created_at timestamp "Created At"
+  updated_at timestamp "Updated At"
+}
+
+
+
+
+chatbot_settings_general{
+    id primary_key,
+    chatbot_id reference to chatbots(id),
+
+    //general settings
+    description,
+    disable_smart_followup ? boolean,
+    number_of_smart_followup_question_shown integer(1-5),
+
+    //disable lead settings --> already done inside the lead_settings table,
+
+    enable_page_context_awareness ? boolean "When enabled, the chatbot will automatically know which page the user is viewing and can answer questions about the current page.",
+    history_message_context integer "Number of History Messages To Be Considered for LLM"
+    llm_model check_in(select model from llm_model where availabilty==true)
+
+    // enterpise plan only
+    Limit_Messages_Per_Conversation ? boolean "When enabled, users will be prompted to start a new conversation after reaching the message limit.",
+    Max_Messages_Per_Conversation integer,
+
+    //Danger zone ---> delete chatbot option
+}
+
+chatbot_settings_userData{
+    //same to lead_settings, not create new table for this, just redirect the reqest to that table
+}
+
+chatbot_conversation_starters {
+    id
+    chatbot_id
+    button_title
+    button_message
+    link_text
+    link_src
+    created_at timestamp "Created At"
+    updated_at timestamp "Updated At"
+}
+
+custom_prompts {
+    id varchar(64) pk "Prompt ID"
+    chatbot_id varchar(32) not null "Chatbot Reference"
+    
+    title varchar(255) not null "Prompt Title"
+    description text "Description"
+    instructions text not null "Instructions"
+    temperature real "Temperature"
+    deletable boolean // false for default prompts
+    creativity_level real "Creativity Level"
+
+    created_at timestamp "Created At"
+    updated_at timestamp "Updated At"
+}
+
+// this will contain either button or link or esclation
+follow_up_prompts {
+    id,
+    chatbot_id,
+    button_title ,
+    button_message,
+    link_text ,
+    link_src,
+    
+    // this will be taken inside the lead generation table
+    //esclation_text
+    //esclation_message
+    created_at timestamp "Created At"
+    updated_at timestamp "Updated At"
+}
+
+chatbot_settings_instruction{
+    id,
+    chatbot_id,
+
+    title,
+    instruction,
+    creativity_level // temperature of the llm, default 0.5
+    deletable boolean // false for default instructions
+
+    created_at timestamp "Created At"
+    updated_at timestamp "Updated At"
+}
+
+chatbot_personas {
+    id
+    chatbot_id
+
+    title varchar(255) not null "Persona Title"
+    description text "Description"
+    instructions text not null "Instructions"
+    creativity_level // temperature of the llm, default 0.5
+    deletable boolean // false for default personas
+
+    created_at timestamp "Created At"
+    updated_at timestamp "Updated At"
+}
+
+// localization, column name called in their own language
+chatbot_settings_localization_texts {
+    id serial pk
+    chatbot_id varchar(32)
+    locale_code varchar(10) -- en, hi, etc.
+
+    -- Home
+    home_title text
+    home_description text
+    add_details text
+    start_conversation text
+    starting text
+
+    -- Messages
+    messages_title text
+    messages_description text
+    no_messages text
+    verify_email_message text
+    conversation_history_info text
+
+    -- Conversation
+    bot_label text
+    you_label text
+    agent_label text
+    escalate_confirmation text
+    escalate_description text
+    yes_continue text
+    cancel text
+    switched_to_human text
+    start_new_conversation text
+    max_messages_title text
+    max_messages_description text
+
+    -- Top Menu / Status
+    connected text
+    disconnected text
+    connecting text
+    disconnecting text
+    reconnect text
+
+    -- Account
+    account_title text
+    verify_email_title text
+    verify_email_description text
+    email_label text
+    name_label text
+    phone_label text
+    submit_button text
+    sending_otp text
+    verify_otp text
+    otp_sent_message text
+    otp_label text
+    verify_continue text
+    resend_otp text
+    edit_details text
+    resetting text
+    verifying text
+    logout text
+    logging_out text
+    verified text
+    edit text
+    update text
+    updating text
+
+    -- Lead Form
+    lead_form_title text
+    lead_form_description text
+    form_heading text
+    form_submitted_message text
+    continue_button text
+    submitting_text text
+    input_disabled_placeholder text
+
+    created_at timestamp
+    updated_at timestamp
+}
+
+// ACTUAL leads is stored inside the chat_users table
+leads_settings{
+    id,
+    chatbot_id, reference to chatbots(id),
+    enable_lead_collection ? boolean
+
+    //basic contact fields
+    customer_name_take ? boolean
+    customer_name text,
+    customer_phone_take? boolean
+    customer_phone text,
+    customer_email_take ? boolean always true
+    customer_email text
+
+    //industry template
+    industry_template (ARRAY[  'Custom - Configure your own lead collection settings','Dental Clinic - Optimized for dental practices and patient scheduling',  'HVAC Services - For heating, cooling, and air conditioning services','Legal Services - For law firms and legal consultations',  'Real Estate - For realtors and property services','Automotive - For auto repair, dealerships, and car services',  'Healthcare - For medical practices and health services','SaaS/Software - For software companies and SaaS products','E-commerce - For online stores and retail businesses','Consulting - For consultants and professional services'])
+
+    //collection_trigger
+    when_to_collect_lead ? check_in("When user show interest, when unable to answer, after__ messages)
+
+    //custom trigger keywords
+    customer_trigger_keywords text,
+
+    //customer form feild
+    customer_form_feild::JSONB{{display_label, feild_name, feild_type, required?, placeholder_text}},
+
+    // Optional Booking Integration
+    booking_integration ? boolean,
+    booking_integration_link text,
+
+    //Lead Capture Email Notifications
+    lead_notification ? boolean,
+    lead_notification_email ARRAY() // text[]
+
+    created_at,
+    updated_at
+}
+
+human_support_settings{
+    id,
+    chatbot_id,
+
+    enable_human_support ? boolean
+
+    // Esclation button settings
+    Replace_all_other_suggestions_with_escalation_buttons ? boolean "When enabled, escalation buttons replace all other suggestions (starters, follow-ups). When disabled, they appear alongside other suggestions"
+    Positive_Feedback_Prompt text,
+    Request_Human_Support_Prompt text,
+    Human_Support_Confirmation_Message text,
+
+    // esclation Notifications
+    // this is already set inside the lead_notification last columns
+    lead_notification ? boolean,
+    lead_notification_email ARRAY() // text[]
+    created_at,
+    updated_at
+}
+
+threads {
+    id ,
+    chatbot_id
+    anonymous? boolean
+    chat_user_id // intially null, later if customer give detail then set this
+    mode varchar(20) "Mode: AI, AGENT, HUMAN"
+    unread_messages_count integer "Unread Messages Count" //updated each time when user send the message and the agent did'nt see it
+
+    webhook_url text "Webhook URL"
+    webhook_token text "Webhook Token"
+
+    escalated boolean "Escalated"
+    important boolean "Important"
+    resolved boolean "Resolved"
+    archieved boolean
+
+    tags::JSONB,
+    positive_count,
+    negative_count,
+
+    started_at timestamp "Started At"
+    updated_at timestamp "Updated At"
+    ended_at timestamp "Ended At"
+}
+
+chatting_customers {
+    id,
+    email,
+    name,
+    phone_number,
+    created_at,
+    updated_at,
+}
+
+// for every msg from llm to user, update the same in the llm_model_usage table
+messages{
+    id,
+    thread_id reference to threads(id),
+    chatbot_id,
+    message_type varchar(50) "Type: NORMAL_MESSAGE, USER_MESSAGE, AGENT_MESSAGE"
+    system_message_type varchar(50) "System Type: CONVERSATION_ESCALATED, etc"
+
+    content text "Question"
+    content_timestamp timestamp "Question Time"
+
+    role varchar(20) "USER | ASSISTANT | AGENT | SYSTEM"
+    agent_name varchar(255) "Agent Name"
+    parent_message_id varchar(32) "For tool chains"
+    gpt_model varchar(50) "GPT Model Used"
+    reaction varchar(20) "Reaction: POSITIVE, NEGATIVE, NEUTRAL"
+    source text "FACEBOOK, INSTAGRAM, ..."
+
+    created_at,
+    updated_at ,
+}
+
+chatbot_integrations {
+    id,
+    chatbot_id,
+    platform_type (enum: 'SLACK', 'MESSENGER', 'CRISP', 'ZOHO_SALES_IQ),
+    config (jsonb), -- stores tokens/keys for that specific platform
+    is_enabled boolean
+}
+
+-- Tracks the high-level file upload
+ingestion_files {
+    id uuid pk
+    chatbot_id varchar(32) fk -> chatbots(id)
+    user_id varchar(32) fk -> users(id)
+
+    file_name varchar(255)
+    file_type varchar(50) -- "PDF", "DOCX", "TXT"
+    file_size integer -- in bytes
+    file_tokens integers
+    file_pages integer
+    file_source varchar(50) -- "LOCAL_UPLOAD | NOTION | GDRIVE | DROPBOX | ONEDRIVE | GITHUB | BOX"
+
+    origin varchar(20)
+    -- FILE | WEB | YOUTUBE
+
+    source_id uuid fk -> ingestion_sources(id)
+
+    s3_url text -- Link to the original file in S3
+
+    total_chunks integer default 0
+    status varchar(20) -- "UPLOADED | CHUNKING | EMBEDDING | COMPLETED | FAILED"
+    //UPDATE THE ingestion_status_log side by side
+
+    created_at timestamp
+    updated_at timestamp
+}
+
+
+
+-- Tracks individual chunks (Lambda 1 output)
+ingestion_chunks {
+    id uuid pk
+    file_id uuid fk -> ingestion_files(id)
+
+    chunk_index integer -- The order of the chunk in the file
+    s3_chunk_url text -- Path to the .txt chunk in S3 (Step 2)
+    chunk_text_preview_link text
+
+    //512 or 1024 (inclunding the overlap, i.e. 1.24% increase in token)
+    token_count integer -- Useful for billing/usage tracking
+
+    -- Lambda 2 tracking
+    embedding_status varchar(20) -- "PENDING | COMPLETED | FAILED"
+    //UPDATE THE ingestion_status_log side by side
+
+    pinecone_vector_id varchar(255) -- The ID used to reference this in Pinecone (Step 3)
+
+    created_at timestamp
+    updated_at timestamp
+}
+
+ingestion_status_logs {
+    id bigserial pk
+
+    -- Flexible targeting
+    entity_type varchar(20) -- "FILE" or "CHUNK" or "SOURCE"
+    entity_id uuid -- The ID from ingestion_files or ingestion_chunks
+
+    status varchar(50) -- e.g., "CHUNKING_STARTED", "CHUNKING_COMPLETED", "EMBEDDING_QUEUED"
+
+    -- Metadata for extra info (e.g., "Processed by Lambda-A in us-east-1")
+    metadata jsonb
+
+    created_at timestamp default now() -- This is your "at this time" record
+}
+
+-- Tracks errors specifically for the ingestion pipeline
+ingestion_errors {
+    id serial pk
+    file_id uuid fk -> ingestion_files(id)
+    chunk_id uuid fk -> ingestion_chunks(id) -- NULL if error happened in Lambda1
+
+    step varchar(50) -- "CHUNKING | EMBEDDING | VECTOR_STORAGE"
+    error_message text
+    retry_count integer default 0
+    resolved_at timestamp
+
+    created_at timestamp
+}
+
+
+
+ingestion_sources {
+    id uuid pk
+
+    file_id uuid,
+    source_type varchar(30) -- "UPLOAD" | "WEBSITE" | "SITEMAP" | "YOUTUBE"
+
+    source_url text -- website URL, sitemap URL, YouTube URL
+    normalized_url text -- canonical URL after redirects
+
+    extractor varchar(50) -- "firecrawl" | "jina" | "browserless" | "youtube_api"
+
+    extraction_status varchar(20) -- "PENDING | FETCHING | CONVERTING | COMPLETED | FAILED"
+    //UPDATE THE ingestion_status_log side by side
+
+    extracted_pages integer
+    extracted_tokens integer
+
+    metadata jsonb -- crawl depth, language, sitemap count, video duration, channel, etc.
+
+    created_at timestamp
+    updated_at timestamp
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Payment Type,Example JSONB Content
+UPI,"{""vpa"": ""user@okaxis"", ""txnid"": ""123456789""}"
+Credit Card,"{""card_type"": ""visa"", ""last4"": ""4242"", ""network"": ""Visa""}"
+NEFT/Bank,"{""bank"": ""HDFC"", ""account_number"": ""XXXX1234"", ""ifsc"": ""HDFC0001""}"
+
+To find all Visa card payments:
+
+SQL
+
+SELECT \* FROM billing
+WHERE payment_details->>'network' = 'Visa';
+To find a specific UPI transaction:
+
+SQL
+
+SELECT \* FROM billing
+WHERE payment_details->>'vpa' = 'username@okhdfcbank';
+
+Workflow for ingestion->
+Step 1. user puts the file in s3 bucket
+Step 2. File is sent to lambda1 where it converts it into chunks, the chunks are then stored inside the s3bucket and its information inside the aws_sqs service
+Step 3. lambda2 takes the information from the aws_sqs and sends the chunks one by one to openai embeddings,, the received embeddings are then stored inside the s3 db + pinecone vectordb
+
+
+| Case | Scenario | Tables Impacted (INSERT) | Key Action |
+| :--- | :--- | :--- | :--- |
+| 1 | Single Subscription Only | user_subscriptions, billing, usage_tracking | Creates the plan instance, records the payment, and starts the usage counter. |
+| 2 | Subscription + Addon | user_subscriptions, user_addons_purchased, billing (2 records or 1 bundled), usage_tracking | Records the base plan and the specific addon features (like "No Branding"). |
+| 3 | Subscription + Addon + Referral | user_subscriptions, user_addons_purchased, user_referrals, billing | Same as Case 2, but also logs the referral usage to track who invited them. |
+| 4 | Sub first, Addon later | Step 1: Same as Case 1. Step 2: user_addons_purchased, billing | A new row is added to user_addons_purchased for every new addon bought later. |
+| 5 | Sharing Referral (Limit Increase) | user_referrals, user_subscriptions (UPDATE) | A new row in user_referrals logs the event; the bonus_messages column in user_subscriptions is updated. |
+
+all posible cases ---> ubscription & Addon Cases
+Case 1: First-Time Subscription Purchase,Tables: user_subscriptions, billing, usage_tracking.
+Case 2: Bundled Purchase (Subscription + Addon),Tables: user_subscriptions, user_addons_purchased, billing, usage_tracking.
+Case 3: Purchasing an Addon Later (Mid-Cycle),Tables: user_addons_purchased, billing.
+Case 4: Purchasing Multiple of the Same Addon,Tables: Multiple rows in user_addons_purchased, billing.
+Case 5: Plan Upgrade/Downgrade,Tables: New row in user_subscriptions (current one marked canceled/replaced), billing.
+Referral & Bonus Cases
+Case 6: New User Joins via Referral Link,Tables: user_referrals (to track the link), user_subscriptions (with bonus_messages applied), billing.
+Case 7: Existing User Refers Someone (Reward Received),Tables: user_referrals (new entry for the referrer), user_subscriptions (UPDATE to existing row to increment bonus columns).
+Case 8: Referral Bonus Expiration,Tables: user_subscriptions (UPDATE to remove bonus_messages after expiry_date).
+Team & Access Control Cases
+Case 9: Sending a Team InviteTables: chatbot_invitations.
+Case 10: Accepting a Team Invite,Tables: chatbot_team_members (Status in chatbot_invitations updated to 'ACCEPTED').
+Case 11: Removing a Team MemberTables: chatbot_team_members (UPDATE leaved_at or Delete).
+Usage & Tracking Cases
+Case 12: Monthly Usage ResetTables: New row in usage_tracking (for the new billing period).
+Case 13: LLM Message ConsumptionTables: llm_model_usage (Update tokens_count), usage_tracking (Update messages_sent_count).
+Case 14: Reaching Rate LimitsAction: No INSERT, but a lookup against user_subscriptions and user_addons_purchased.
+Billing & Payment Cases
+Case 15: Payment FailureTables: billing (status marked 'failed', error_code recorded).
+Case 16: Refund ProcessedTables: billing (status marked 'refunded').

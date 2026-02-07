@@ -1,17 +1,19 @@
-import dotenv from "dotenv"
+import dotenv from "dotenv";
 import connectDB from "./db/index.js";
-import { app } from './app.js';
+import { app } from "./app.js";
 
-dotenv.config({ path: './.env' });
-
+dotenv.config({ path: "./.env" });
 
 let db;
 
 await connectDB()
-  .then((dbObject) => { 
-    db = dbObject
+  .then((dbObject) => {
+    db = dbObject;
+
     app.listen(process.env.EXPRESS_PORT || 8000, () => {
-      console.log(`⚙️  Server is running at http://localhost:${process.env.EXPRESS_PORT}`);
+      console.log(
+        `⚙️  Server is running at http://localhost:${process.env.EXPRESS_PORT}`
+      );
     });
   })
   .catch((err) => {
@@ -23,16 +25,7 @@ await connectDB()
 //   return dbInstance;
 // };
 
-export { db }
-
-
-
-
-
-
-
-
-
+export { db };
 
 /*
 import express from "express"
